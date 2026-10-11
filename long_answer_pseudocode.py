@@ -1,6 +1,8 @@
 
 # Schematic pseudocode for hitting projections and player valuation.
 # All historical estimates respect their original information cutoffs.
+# Fielding and baserunning projections are assumed to be provided
+# by separate, existing models.
 
 PA_OUTCOMES = ["K", "BB", "HBP", "IPO", "1B", "2B", "3B", "HR"]
 
@@ -35,7 +37,7 @@ def observations_as_of(data, cutoff):
 
 
 # ------------------------------------------------------------
-# 2. ESTIMATE LATENT SKILLS
+# 2. ESTIMATE LATENT HITTING SKILLS
 # ------------------------------------------------------------
 
 def estimate_skills_as_of(data, cutoff):
@@ -118,6 +120,15 @@ def simulate_player_values(model, data, cutoff, N, M):
 
     history = data.available_as_of(cutoff)
 
+    # Take fielding and baserunning projections as given
+    # from existing R&D projection systems. For historical
+    # validation, use appropriately point-in-time estimates.
+    other_projections = get_existing_projections_as_of(
+        data, cutoff,
+        components=["fielding", "baserunning"],
+        seasons=M
+    )
+
     # Maintain distinct playing-time / deployment scenarios.
     results = {
         "optimized": [],
@@ -126,8 +137,12 @@ def simulate_player_values(model, data, cutoff, N, M):
 
     for sim in range(N):
 
+        # ----------------------------------------------------
+        # 4A. SAMPLE HITTING SKILLS AND FUTURE TRAJECTORIES
+        # ----------------------------------------------------
+
         # Sample from the joint posterior distribution of
-        # latent skills produced by the SSM.
+        # latent hitting skills produced by the SSM.
         sampled_skills = sample_joint_skill_posterior(
             model.current_skills
         )
@@ -148,13 +163,13 @@ def simulate_player_values(model, data, cutoff, N, M):
         )
 
         # ----------------------------------------------------
-        # 4A. GENERATE SIMULATED BATTING LINES
+        # 4B. GENERATE SIMULATED BATTING LINES
         # ----------------------------------------------------
 
-        # Each sampled skill trajectory produces a corresponding
-        # batting line for each future season, independent of
-        # playing time. These are distributions/rates per PA,
-        # rather than accrued counting statistics.
+        # Each sampled hitting skill trajectory produces a
+        # corresponding batting line for each future season.
+        # These are PA outcome rates/probabilities rather than
+        # accrued counting statistics.
         simulated_batting_lines = []
 
         for year in range(M):
@@ -162,7 +177,7 @@ def simulate_player_values(model, data, cutoff, N, M):
             skills = skill_paths[year]
             environment = environments[year]
 
-            # Map simulated latent skills into hierarchical
+            # Map simulated hitting skills into hierarchical
             # PA outcome probabilities.
             p_root = model.outcome_model.predict_root(
                 skills, environment
@@ -174,8 +189,6 @@ def simulate_player_values(model, data, cutoff, N, M):
                 p_root, p_bip
             )
 
-            # This skill draw induces one simulated batting
-            # line, represented by PA probabilities and rates.
             batting_line = batting_line_from_pa_probabilities(
                 p_pa, outcomes=PA_OUTCOMES
             )
@@ -183,7 +196,7 @@ def simulate_player_values(model, data, cutoff, N, M):
             simulated_batting_lines.append(batting_line)
 
         # ----------------------------------------------------
-        # 4B. MODEL PLAYING TIME AND ACCRUED PRODUCTION
+        # 4C. MODEL PLAYING TIME AND ACCRUED PRODUCTION
         # ----------------------------------------------------
 
         # Both approaches use the same simulated batting lines,
@@ -193,6 +206,7 @@ def simulate_player_values(model, data, cutoff, N, M):
             roster = initialize_roster_state(history)
             contract_state = initialize_contract_state(history)
             annual_surplus = []
+            annual_results = []
 
             for year in range(M):
 
@@ -200,10 +214,24 @@ def simulate_player_values(model, data, cutoff, N, M):
                 environment = environments[year]
                 batting_line = simulated_batting_lines[year]
 
-                # Calculate expected offensive value per PA
-                # from this particular simulated batting line.
-                rv_per_pa = expected_run_value(
+                # Use fielding and baserunning projections from
+                # existing models; their construction is outside
+                # the scope of this hitting projection system.
+                fielding_rates = other_projections.fielding[year]
+                baserunning_rv_per_pa = (
+                    other_projections.baserunning[year]
+                )
+
+                # Expected hitting value per PA from this
+                # particular simulated batting line.
+                hitting_rv_per_pa = expected_hitting_run_value(
                     batting_line, environment.linear_weights
+                )
+
+                # Include baserunning in total offensive value,
+                # avoiding double-counting across components.
+                total_offensive_rv_per_pa = (
+                    hitting_rv_per_pa + baserunning_rv_per_pa
                 )
 
                 # Simulate health, promotion, and eligibility
@@ -214,11 +242,12 @@ def simulate_player_values(model, data, cutoff, N, M):
 
                 if strategy == "optimized":
 
-                    # Optimize roster deployment using the
-                    # simulated batting lines and constraints.
-                    playing_time = solve_roster_MILP(
-                        rv_per_pa,
-                        projected_defense,
+                    # Optimize deployment across the roster using
+                    # projected hitting, baserunning, and fielding
+                    # values, subject to roster constraints.
+                    deployment = solve_roster_MILP(
+                        total_offensive_rv_per_pa,
+                        fielding_rates,
                         positional_flexibility,
                         availability,
                         roster_constraints
@@ -227,39 +256,73 @@ def simulate_player_values(model, data, cutoff, N, M):
                 else:
 
                     # Empirical approach incorporates the
-                    # simulated batting line, historical playing
-                    # time, incumbency, contracts, etc.
-                    expected_pt = model.playing_time_model.predict(
-                        batting_line, skills, roster,
-                        contract_state, availability
+                    # simulated batting line and existing
+                    # non-hitting projections, alongside
+                    # incumbency, contracts, and availability.
+                    expected_deployment = (
+                        model.playing_time_model.predict(
+                            batting_line,
+                            fielding_rates,
+                            baserunning_rv_per_pa,
+                            roster,
+                            contract_state,
+                            availability
+                        )
                     )
 
-                    playing_time = enforce_roster_constraints(
-                        expected_pt, availability
+                    deployment = enforce_roster_constraints(
+                        expected_deployment, availability
                     )
 
-                # Playing time determines accrued production
-                # from the ALREADY simulated batting line.
+                # Deployment determines both plate appearances
+                # and defensive innings by position.
+                playing_time = deployment.plate_appearances
+                defensive_innings = deployment.innings_by_position
+
+                # Accrue production from the ALREADY simulated
+                # batting line and existing non-hitting projections.
                 # No additional batting-line draw is performed.
-                accrued_production = apply_playing_time(
-                    batting_line, playing_time
+                hitting_runs = apply_playing_time(
+                    batting_line,
+                    playing_time,
+                    environment.linear_weights
                 )
 
-                # Evaluate accrued value in roster context,
-                # including appropriate non-hitting contributions.
+                baserunning_runs = (
+                    baserunning_rv_per_pa * playing_time
+                )
+
+                fielding_runs = accrue_fielding_value(
+                    fielding_rates,
+                    defensive_innings
+                )
+
+                accrued_production = {
+                    "hitting": hitting_runs,
+                    "baserunning": baserunning_runs,
+                    "fielding": fielding_runs
+                }
+
+                # Evaluate total marginal wins in roster context.
                 marginal_wins = calculate_marginal_roster_wins(
-                    accrued_production, playing_time,
-                    projected_defense, roster
+                    accrued_production,
+                    deployment,
+                    roster,
+                    environment
                 )
 
                 # ------------------------------------------------
-                # 4C. SIMULATE CONTRACTS AND PLAYER VALUE
+                # 4D. SIMULATE CONTRACTS AND PLAYER VALUE
                 # ------------------------------------------------
 
                 # Contract outcomes depend on the production
                 # and playing time of this particular simulation.
                 costs = model.contract_models.simulate(
-                    marginal_wins, contract_state, year
+                    marginal_wins,
+                    accrued_production,
+                    deployment,
+                    contract_state,
+                    year
                 )
 
                 player_value = financial_value(
@@ -267,11 +330,19 @@ def simulate_player_values(model, data, cutoff, N, M):
                 )
                 annual_surplus.append(player_value - costs)
 
+                annual_results.append({
+                    "batting_line": batting_line,
+                    "deployment": deployment,
+                    "production": accrued_production,
+                    "marginal_wins": marginal_wins,
+                    "costs": costs
+                })
+
                 # Update roster, service time, and contract
                 # status before simulating the following season.
                 roster, contract_state = update_states(
                     roster, contract_state,
-                    playing_time, marginal_wins, costs
+                    deployment, marginal_wins, costs
                 )
 
             # Calculate surplus and asset value within each
@@ -284,13 +355,13 @@ def simulate_player_values(model, data, cutoff, N, M):
             )
 
             results[strategy].append({
-                "batting_lines": simulated_batting_lines,
+                "annual_results": annual_results,
                 "surplus_value": sv,
                 "asset_value": av
             })
 
     # Aggregate across simulations only after each player's
-    # production, usage, and value have been determined.
+    # production, deployment, contracts, and value are determined.
     return summarize_player_distributions(results)
 
 
@@ -302,6 +373,8 @@ for cutoff in chronological_holdout_dates:
 
     # Refit the stack using only data available by cutoff.
     # Historical training targets must also be known by cutoff.
+    # External non-hitting projections must respect the same
+    # historical information cutoffs.
     model = train_projection_stack(data, cutoff, M)
 
     predictions = simulate_player_values(
