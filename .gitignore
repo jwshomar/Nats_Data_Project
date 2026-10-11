@@ -1,0 +1,28 @@
+# Python
+.venv/
+.venv_old/
+__pycache__/
+*.py[cod]
+
+# Development caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Data and outputs
+data/
+outputs/
+models/
+
+# Backups
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db

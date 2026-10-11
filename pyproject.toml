@@ -1,0 +1,71 @@
+
+[project]
+name = "nats-data-project"
+version = "0.1.0"
+description = "Reusable Python environment for scientific computing, Bayesian statistics, and machine learning"
+requires-python = ">=3.13,<3.14"
+
+dependencies = [
+    # Core scientific computing
+    "numpy",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "seaborn",
+    "scikit-learn",
+    "statsmodels",
+    "sympy",
+    "numba",
+
+    # Data processing
+    "polars",
+    "pyarrow",
+    "duckdb",
+    "openpyxl",
+
+    # Machine learning
+    "xgboost",
+    "lightgbm",
+    "catboost",
+    "optuna",
+    "shap",
+
+    # GPU-accelerated frameworks
+    "torch",
+    "jax[cuda13]",
+
+    # Bayesian statistics
+    "pymc",
+    "arviz",
+    "numpyro",
+    "pyro-ppl",
+
+    # JAX ecosystem
+    "flax",
+    "optax",
+    "distrax",
+
+    # Statistical modeling
+    "formulaic",
+    "patsy",
+    "linearmodels",
+
+    # Development tools
+    "jupyterlab",
+    "ipykernel",
+    "pytest",
+    "ruff",
+    "tqdm",
+    "joblib",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
