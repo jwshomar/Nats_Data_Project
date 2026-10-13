@@ -1,0 +1,82 @@
+WRITEUP STARTING POINT
+
+The following is a document that will be used as the base for the writeup
+Exact order and structure of the writeup is at your discretion (though I will iterate on it), but must follow the requests below
+
+Goal/format:
+    Clear, concise html report with:
+        nontechnical overview
+        explicit answers to the three prompt questions
+        technical methods/description 
+        evaluation
+        uncertainty measures
+        future improvements
+    Can refer to notebook and code in the report but should mostly stand on its own
+
+Suggested graphics as support (with appropriate text to explain/contextualize them): 
+    batter 1, general LHH, general RHH predictions to three prompt questions 
+    held-out predictive check by context
+    overall test reliability curve (only with orange line that has context and batter + pitcher)
+    test log loss and brier score plots
+    visual of contact rate from table immediately preceding the "Contact modeling: target, ..." header
+
+Describe modeling approach:
+    estimate P(contact | swing) using regularized logistic model based on:
+        context (bat side, throw side, IZ/OOZ, and FB/non-FB) 
+        jointly estimated batter and pitcher effects
+    mention pooling of information across contexts and mean shrinkage
+    uses joint Laplace coefficient draws for uncertainty bounds
+
+Data/assumptions:
+    note extreme platoon contact differences (and show with visual)
+    state that treated data as ground truth rather than trying to correct toward baseball expectations
+        resultantly note that model is valid for this distribution of players and not actual ML 
+    model assumes independence between pitches (incorrect, but hard to resolve without game/date info)
+    switch hitters don't exist in this universe
+    player effects shared across contexts (e.g., non-FB observations support FB observations)
+
+Explicit prompt responses:
+    include explicit response to three questions in the prompt, and do so for batter 1, general LHH, general RHH 
+    note that notebook can answer any combo desired
+    note that default outputs are to a generalized set of expected pitches/pitcher quality based solely on bat side
+        also note that this can be configured/changed in notebook
+        note what's meant by neutal quality: 0 effect on logit scale, not pooled observed rate
+    provide responses in table form and graphical form
+        both forms should include uncertainty
+        visual should contain all three (batter 1, LHH, and RHH) on one plot with different colors
+    From running the notebook myself, here are the values (please feel free to verify):
+        Scenario        Batter 1 (RHH)     Neutral LHH        Neutral RHH
+        IZ              54.7% (47.0-62.7)  87.8% (87.0-88.5)  58.9% (57.8-60.1)
+        IZ vs LHP       90.8% (87.0-93.6)  44.0% (40.4-48.0)  92.3% (91.3-93.2)
+        IZ FB vs LHP    93.4% (90.3-95.5)  50.4% (45.4-55.6)  94.6% (93.5-95.5)
+
+Evaluation/training of model:
+    uses 60/20/20 context-stratified train/valid/test split with all players represented in each
+    refit selected models on training plus validation (keeps test swings out)
+    mention that tested various models (no context, context-only, context + batter, context + pitcher)
+        log loss, brier score, and AUC all improved as info added
+    evaluated pair-grouped development to check that model wasn't sensitive to data split decision 
+        doesn't technically fully verify, but good evidence
+    without date/game data results assess held-out swings involving known players
+        distinct from validated future-season forecasts or game independent performance
+
+Uncertainty:
+    distinguish parameter uncertainty, bernoulli outcome randomness, model/selection uncertainty, and measurement/sampling uncertainty
+    predictive checks include outcome noise
+
+Additional info desired:
+    request pitch-level stuff features (velo, break, release, location) and count
+        adjustment can then reflect pitch quality rather than just pitcher quality
+    request date/game info for chronological forecasting and splits that keep each game's observations together
+    request larger, more varied samples
+        current data is highly biased, so benefiical to have more complete data set
+        would support more sophisticated model like NN with KL divergence loss
+
+Improvements:
+    pooled player-specific context effects (e.g. individual platoon or fastball effects)
+    if more data and richer features, evaluate KL divergence loss NN, similar to approach I worked on with Pirates.
+    if game/date info available, change training scheme to properly provide future predictions
+    integrate P(swing) model since pitch selection changes contact rates
+
+Other interesting question prompt:
+    how much of observed contact rate variation reflects pitches hitters swing at vs contact ability on comparable pitches? 
