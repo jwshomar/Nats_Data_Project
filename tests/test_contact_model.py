@@ -219,3 +219,73 @@ def test_reference_mix_conditions_on_batting_side_and_excludes_out_of_zone(swing
         batter_projection(model, 7, reference.loc[reference.bat_side.eq("L")], draws)
     with pytest.raises(ValueError, match="in-zone swings"):
         reference_contexts(out_of_zone)
+
+
+def test_side_only_lookup_uses_neutral_batter_and_side_specific_weights(swings):
+    model = ContactModel().fit(swings)
+    model.laplace_covariance(swings)
+    draws = model.draw_coefficients(300, 5)
+    reference = reference_contexts(swings)
+    for side in ["L", "R"]:
+        result = batter_projection(model, None, reference, draws, bat_side=side)
+        frame = reference.loc[reference.bat_side.eq(side)].assign(is_in_zone=1)
+        design = model.design_matrix(frame, neutral_batter=True, neutral_pitcher=True)
+        expected = frame.weight @ model.predict(
+            frame, neutral_batter=True, neutral_pitcher=True
+        )
+        simulated = frame.weight.to_numpy() @ expit(design @ draws)
+        assert result.iloc[0].contact_probability == pytest.approx(expected)
+        assert result.iloc[0].lower_95 == pytest.approx(np.quantile(simulated, 0.025))
+        assert result.iloc[0].upper_95 == pytest.approx(np.quantile(simulated, 0.975))
+        assert (result.lower_95 < result.upper_95).all()
+
+
+def test_configurable_lookup_supports_all_contexts_and_known_batters(swings):
+    from contact_model import CONTEXT_LEVELS, context_projection
+
+    model = ContactModel().fit(swings)
+    model.laplace_covariance(swings)
+    draws = model.draw_coefficients(300, 6)
+    for bat, throw, zone, fb in CONTEXT_LEVELS:
+        result = context_projection(
+            model, draws, bat_side=bat, throw_side=throw, is_in_zone=zone, is_fb=fb
+        )
+        expected = model.predict(result, neutral_batter=True, neutral_pitcher=True)[0]
+        assert result.contact_probability.iloc[0] == pytest.approx(expected)
+        assert 0 < result.lower_95.iloc[0] < result.upper_95.iloc[0] < 1
+    known = context_projection(
+        model, draws, batter_id=1, throw_side="R", is_in_zone=0, is_fb=0
+    )
+    frame = known.assign(batter_id=1)
+    assert known.bat_side.iloc[0] == "L"
+    assert known.contact_probability.iloc[0] == pytest.approx(
+        model.predict(frame, neutral_pitcher=True)[0]
+    )
+    fully_conditioned = batter_projection(
+        model, 1, reference_contexts(swings), draws
+    ).iloc[-1]
+    default = context_projection(model, draws, batter_id=1).iloc[0]
+    assert default.contact_probability == pytest.approx(
+        fully_conditioned.contact_probability
+    )
+    assert default.lower_95 == pytest.approx(fully_conditioned.lower_95)
+
+
+def test_lookup_rejects_missing_or_conflicting_inputs(swings):
+    from contact_model import context_projection
+
+    model = ContactModel().fit(swings)
+    draws = model.theta[:, None]
+    reference = reference_contexts(swings)
+    with pytest.raises(ValueError, match="Supply a batter_id"):
+        batter_projection(model, None, reference, draws)
+    with pytest.raises(ValueError, match="bat_side must"):
+        context_projection(model, draws, bat_side="X")
+    with pytest.raises(ValueError, match="bats L"):
+        context_projection(model, draws, batter_id=1, bat_side="R")
+    with pytest.raises(ValueError, match="Handedness"):
+        context_projection(model, draws, bat_side="L", throw_side="X")
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        context_projection(model, draws, bat_side="L", is_in_zone=2)
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        context_projection(model, draws, bat_side="L", is_fb=None)

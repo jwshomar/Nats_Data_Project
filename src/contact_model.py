@@ -406,15 +406,42 @@ def reference_contexts(development: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def batter_projection(
-    model: ContactModel, batter_id: int, reference: pd.DataFrame, draws: NDArray
-) -> pd.DataFrame:
-    """Three PDF answers using neutral pitching and the batter's side-specific mix."""
+def _resolve_batter(
+    model: ContactModel, batter_id: int | None, bat_side: str | None
+) -> tuple[str, bool]:
+    """Resolve a known batter or an explicitly requested neutral batting side."""
+    if bat_side is not None and bat_side not in ["L", "R"]:
+        raise ValueError("bat_side must be 'L', 'R', or None.")
+    if batter_id is None:
+        if bat_side is None:
+            raise ValueError("Supply a batter_id or a bat_side ('L' or 'R').")
+        return bat_side, True
     ids = pd.Index(model.player_ids["batter_id"])
     position = ids.get_indexer([batter_id])[0]
     if position < 0:
         raise ValueError(f"Unknown batter ID {batter_id}; choose a training batter ID.")
     side = model.player_sides["batter_id"][position]
+    if bat_side is not None and bat_side != side:
+        raise ValueError(
+            f"Batter {batter_id} bats {side}; supplied bat_side is {bat_side}."
+        )
+    return side, False
+
+
+def batter_projection(
+    model: ContactModel,
+    batter_id: int | None,
+    reference: pd.DataFrame,
+    draws: NDArray,
+    *,
+    bat_side: str | None = None,
+) -> pd.DataFrame:
+    """Three PDF answers for a known batter or neutral batter of a chosen side.
+
+    Set batter_id=None and bat_side='L' or 'R' for neutral batter quality.
+    Both modes use neutral pitching and the side-specific reference mix.
+    """
+    side, neutral_batter = _resolve_batter(model, batter_id, bat_side)
     side_reference = reference.loc[reference.bat_side.eq(side)]
     if side_reference.empty:
         raise ValueError(f"No reference mix for batting side {side}.")
@@ -442,7 +469,9 @@ def batter_projection(
         if weights.sum() <= 0:
             raise ValueError(f"No reference support for {name}.")
         weights = weights / weights.sum()
-        design = model.design_matrix(frame, neutral_pitcher=True)
+        design = model.design_matrix(
+            frame, neutral_batter=neutral_batter, neutral_pitcher=True
+        )
         simulated_rates = weights @ expit(design @ draws)
         rows.append(
             {
@@ -453,6 +482,44 @@ def batter_projection(
             }
         )
     return pd.DataFrame(rows).set_index("scenario")
+
+
+def context_projection(
+    model: ContactModel,
+    draws: NDArray,
+    *,
+    batter_id: int | None = None,
+    bat_side: str | None = None,
+    throw_side: str = "L",
+    is_in_zone: int = 1,
+    is_fb: int = 1,
+) -> pd.DataFrame:
+    """Predict one exact context vs neutral pitching, including uncertainty.
+
+    Batting side can identify a neutral batter, or be inferred from a known ID.
+    All four context features are fixed, so no reference mixture is needed.
+    """
+    side, neutral_batter = _resolve_batter(model, batter_id, bat_side)
+    frame = pd.DataFrame(
+        [
+            {
+                "batter_id": batter_id,
+                "bat_side": side,
+                "throw_side": throw_side,
+                "is_in_zone": is_in_zone,
+                "is_fb": is_fb,
+            }
+        ]
+    )
+    design = model.design_matrix(
+        frame, neutral_batter=neutral_batter, neutral_pitcher=True
+    )
+    probabilities = expit(design @ draws)[0]
+    result = frame[CONTEXT].copy()
+    result["contact_probability"] = float(expit(design @ model.theta)[0])
+    result["lower_95"] = float(np.quantile(probabilities, 0.025))
+    result["upper_95"] = float(np.quantile(probabilities, 0.975))
+    return result
 
 
 def simulation_recovery(
