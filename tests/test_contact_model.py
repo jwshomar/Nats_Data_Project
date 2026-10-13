@@ -128,10 +128,10 @@ def test_projection_averages_probabilities_with_joint_draws(swings):
     model.laplace_covariance(swings)
     draws = model.draw_coefficients(200, 2)
     reference = reference_contexts(swings)
-    assert reference.weight.sum() == pytest.approx(1)
+    assert np.allclose(reference.groupby("bat_side").weight.sum(), 1)
     projected = batter_projection(model, 1, reference, draws)
-    frame = reference.assign(batter_id=1, bat_side="L", is_in_zone=1)
-    expected = reference.weight @ model.predict(frame, neutral_pitcher=True)
+    frame = reference.loc[reference.bat_side.eq("L")].assign(batter_id=1, is_in_zone=1)
+    expected = frame.weight @ model.predict(frame, neutral_pitcher=True)
     assert projected.iloc[0].contact_probability == pytest.approx(expected)
     assert len(projected) == 3
     assert projected.lower_95.between(0, 1).all()
@@ -171,3 +171,51 @@ def test_validation_selection_prefers_stronger_shrinkage_when_scores_are_close()
     assert exact_best.pitcher_precision == 0.01
     with pytest.raises(ValueError, match="nonnegative"):
         select_shrinkage(scores, tolerance=-1)
+
+
+def test_reference_mix_conditions_on_batting_side_and_excludes_out_of_zone(swings):
+    from scipy.special import logit
+
+    from contact_model import CONTEXT_LEVELS
+
+    # LHH: 75% LHP; RHH: 25% LHP, with different FB mixes within LHP.
+    contexts = [
+        ("L", "L", 0),
+        ("L", "L", 0),
+        ("L", "L", 1),
+        ("L", "R", 1),
+        ("R", "L", 0),
+        ("R", "R", 0),
+        ("R", "R", 0),
+        ("R", "R", 1),
+    ]
+    in_zone = pd.DataFrame(contexts, columns=["bat_side", "throw_side", "is_fb"])
+    in_zone["is_in_zone"] = 1
+    out_of_zone = in_zone.iloc[[0]].assign(is_in_zone=0)
+    reference = reference_contexts(pd.concat([in_zone, out_of_zone], ignore_index=True))
+    assert reference.swings.sum() == len(in_zone)
+    assert np.allclose(reference.groupby("bat_side").weight.sum(), 1)
+    lhp_weights = (
+        reference.loc[reference.throw_side.eq("L")].groupby("bat_side").weight.sum()
+    )
+    assert lhp_weights["L"] == pytest.approx(0.75)
+    assert lhp_weights["R"] == pytest.approx(0.25)
+    assert reference.loc[reference.swings.eq(0), "weight"].eq(0).all()
+
+    model = ContactModel().fit(swings)
+    model.theta[:] = 0
+    for i, (_, throw, _, fb) in enumerate(CONTEXT_LEVELS):
+        model.theta[i] = logit((0.1 if throw == "L" else 0.7) + 0.2 * fb)
+    draws = model.theta[:, None]
+    left = batter_projection(model, 1, reference, draws)
+    right = batter_projection(model, 7, reference, draws)
+    assert left.iloc[0].contact_probability == pytest.approx(0.35)
+    assert right.iloc[0].contact_probability == pytest.approx(0.6)
+    assert left.iloc[1].contact_probability == pytest.approx((0.1 + 0.1 + 0.3) / 3)
+    assert right.iloc[1].contact_probability == pytest.approx(0.1)
+    assert left.iloc[2].contact_probability == pytest.approx(0.3)
+    assert right.iloc[2].contact_probability == pytest.approx(0.3)
+    with pytest.raises(ValueError, match="batting side R"):
+        batter_projection(model, 7, reference.loc[reference.bat_side.eq("L")], draws)
+    with pytest.raises(ValueError, match="in-zone swings"):
+        reference_contexts(out_of_zone)

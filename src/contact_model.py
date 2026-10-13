@@ -379,37 +379,57 @@ def select_shrinkage(trials: pd.DataFrame, tolerance: float = 0.001) -> pd.Serie
 
 
 def reference_contexts(development: pd.DataFrame) -> pd.DataFrame:
-    """Freeze a common joint IZ swing mix, excluding evaluation test data."""
+    """Freeze joint throw-side/FB weights within batting side and IZ swings.
+
+    Weights sum to one for each represented batting side. Every hitter of that
+    side uses the same mix, estimated from development data only. Zero-count
+    throw-side/FB combinations remain explicit in the returned table.
+    """
     iz = development.loc[development.is_in_zone.eq(1)]
+    batting_sides = sorted(development.bat_side.unique())
     index = pd.MultiIndex.from_product(
-        [["L", "R"], [0, 1]], names=["throw_side", "is_fb"]
+        [batting_sides, ["L", "R"], [0, 1]],
+        names=["bat_side", "throw_side", "is_fb"],
     )
-    counts = iz.groupby(["throw_side", "is_fb"]).size().reindex(index, fill_value=0)
-    if counts.sum() == 0 or counts.loc["L"].sum() == 0:
-        raise ValueError("Reference mix requires in-zone swings including LHP.")
+    counts = (
+        iz.groupby(["bat_side", "throw_side", "is_fb"])
+        .size()
+        .reindex(index, fill_value=0)
+    )
+    totals = counts.groupby(level="bat_side").transform("sum")
+    if counts.empty or totals.eq(0).any():
+        raise ValueError("Reference mix requires in-zone swings for each batting side.")
     return (
         counts.rename("swings")
         .reset_index()
-        .assign(weight=counts.to_numpy() / counts.sum())
+        .assign(weight=(counts / totals).to_numpy())
     )
 
 
 def batter_projection(
     model: ContactModel, batter_id: int, reference: pd.DataFrame, draws: NDArray
 ) -> pd.DataFrame:
-    """Three standardized PDF answers for one known batter vs neutral pitching."""
+    """Three PDF answers using neutral pitching and the batter's side-specific mix."""
     ids = pd.Index(model.player_ids["batter_id"])
     position = ids.get_indexer([batter_id])[0]
     if position < 0:
         raise ValueError(f"Unknown batter ID {batter_id}; choose a training batter ID.")
     side = model.player_sides["batter_id"][position]
+    side_reference = reference.loc[reference.bat_side.eq(side)]
+    if side_reference.empty:
+        raise ValueError(f"No reference mix for batting side {side}.")
     rows = []
     for name, subset in [
-        ("In-zone pitches", reference),
-        ("In-zone pitches vs LHP", reference.loc[reference.throw_side.eq("L")]),
+        ("In-zone pitches", side_reference),
+        (
+            "In-zone pitches vs LHP",
+            side_reference.loc[side_reference.throw_side.eq("L")],
+        ),
         (
             "In-zone fastballs vs LHP",
-            reference.loc[reference.throw_side.eq("L") & reference.is_fb.eq(1)],
+            side_reference.loc[
+                side_reference.throw_side.eq("L") & side_reference.is_fb.eq(1)
+            ],
         ),
     ]:
         frame = subset.assign(batter_id=batter_id, bat_side=side, is_in_zone=1)
